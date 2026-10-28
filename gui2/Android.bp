@@ -12,15 +12,15 @@ genrule {
     cmd: "python3 $(location generate_svg_header.py) $(in) > $(out)",
 }
 
+// The boot artwork is one full-screen still. It is turned into a plain
+// RGB888 byte array so lv_image can draw it straight out of .rodata: no
+// image decoder, no heap and no runtime file access in recovery.
 genrule {
-    name: "gui2_splash_assets_header",
-    srcs: [
-        "image/splash/*.png",
-        "image/splash/layout.txt",
-    ],
-    out: ["gui2_splash_assets.h"],
-    tool_files: ["generate_splash_header.py"],
-    cmd: "python3 $(location generate_splash_header.py) $(in) > $(out)",
+    name: "gui2_splash_bg_c",
+    srcs: ["image/splash_bg.png"],
+    out: ["splash_bg.c"],
+    tool_files: ["gen_splash_bg.py"],
+    cmd: "python3 $(location gen_splash_bg.py) $(in) -o $(out)",
 }
 
 // LVGL-based recovery UI library.
@@ -45,9 +45,9 @@ cc_library_shared {
     ],
     generated_headers: [
         "gui2_svg_assets_header",
-        "gui2_splash_assets_header",
     ],
     srcs: [
+        ":gui2_splash_bg_c",
         "app/gui2_loop.cpp",
         "app/gui2_lifecycle.cpp",
         "app/screen_actions.cpp",

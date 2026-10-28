@@ -5801,7 +5801,6 @@ static bool startup_language_known = false;
 static bool startup_failed = false;
 static bool startup_input_rescanned = false;
 static uint64_t startup_last_poll_ms = 0;
-static uint64_t splash_started_ms = 0;
 static bool splash_dismiss_pending = false;
 static gui2_pages::progress_page_view startup_script_view;
 static size_t startup_script_consumed = 0;
@@ -5895,11 +5894,6 @@ static const char* startup_step_text(gui2_backend::startup_step step) {
   }
 }
 
-static float startup_fraction(gui2_backend::startup_step step) {
-  return static_cast<float>(static_cast<int>(step)) /
-         static_cast<float>(static_cast<int>(gui2_backend::startup_step::DONE));
-}
-
 static void enter_startup_pause(page_kind page) {
   if (page_router.current() == page && shell_ready) return;
   create_pages();
@@ -5969,19 +5963,15 @@ static void poll_startup(uint64_t now_ms) {
     enter_startup_pause(page_kind::DECRYPT);
   poll_startup_script();
 
-  // A normal start is over before any of this could be read.
-  if (now_ms - splash_started_ms >= 3000) gui2_shell::show_splash_details(&splash_view);
-
   if (status.step != gui2_backend::startup_step::DONE) {
     gui2_shell::update_splash(&splash_view,
-                              startup_language_known ? startup_step_text(status.step) : "",
-                              startup_fraction(status.step));
+                              startup_language_known ? startup_step_text(status.step) : "");
     return;
   }
 
   startup->finish();
   startup = nullptr;
-  gui2_shell::update_splash(&splash_view, strings().startup_finishing, 1.0f);
+  gui2_shell::update_splash(&splash_view, strings().startup_finishing);
 
   const bool from_pause = shell_ready;
   const bool from_decrypt = page_state.decrypt_during_startup;
@@ -6508,7 +6498,6 @@ int gui2_start(const gui2_context* context) {
     splash.version = gui2_shell::version_text();
     splash.device = splash_device.c_str();
     splash_view = gui2_shell::create_splash(splash);
-    splash_started_ms = monotonic_ms();
     splash_dismiss_pending = false;
     startup->start();
   } else {
