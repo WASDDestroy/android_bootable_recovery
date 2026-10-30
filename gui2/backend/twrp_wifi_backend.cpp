@@ -387,6 +387,14 @@ void twrp_wifi_backend::run_connect(std::string ssid, wifi_security security,
                                             " | grep 'inet ' | awk -F'[: ]+' '{print $4}'");
   const std::string gateway = first_line_of(std::string("netstat -rn | grep ") + kInterface +
                                             " | grep UG | awk '{print $2}'");
+  // Android's netd is not running in recovery, so bionic falls back to
+  // /etc/resolv.conf for hostname resolution.  dhcpcd never writes it here
+  // (its hooks are missing), which is why DNS lookups failed while raw IP
+  // traffic worked.  Use the gateway first, then two public resolvers.
+  if (!gateway.empty()) run("echo nameserver " + gateway + " > /etc/resolv.conf");
+  run("echo nameserver 119.29.29.29 >> /etc/resolv.conf");
+  run("echo nameserver 223.5.5.5 >> /etc/resolv.conf");
+  run("echo nameserver 1.1.1.1 >> /etc/resolv.conf");
   note("Connected\n");
   note("IP address: %s\n", address.empty() ? "(unknown)" : address.c_str());
   note("Gateway: %s\n", gateway.empty() ? "(unknown)" : gateway.c_str());
