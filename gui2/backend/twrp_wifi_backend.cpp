@@ -304,6 +304,14 @@ void twrp_wifi_backend::run_connect(std::string ssid, wifi_security security,
   wpa("add_network");
   wpa("set_network 0 ssid " + quoted("\"" + ssid + "\""));
   wpa(std::string("set_network 0 key_mgmt ") + key_management_for(security));
+  if (security == wifi_security::WPA3) {
+    // WPA3-SAE mandates PMF.  Without ieee80211w=2 wpa_supplicant skips the
+    // BSS with "no mgmt frame protection enabled but AP requires it".
+    // sae_pwe=2 permits both H2E and hunting-and-pecking, needed by APs that
+    // advertise only SAE-H2E.
+    wpa("set_network 0 ieee80211w 2");
+    wpa("set_network 0 sae_pwe 2");
+  }
   if (security != wifi_security::OPEN)
     wpa("set_network 0 psk " + quoted("\"" + password + "\""));
   wpa("enable_network 0");
@@ -332,6 +340,14 @@ void twrp_wifi_backend::run_connect(std::string ssid, wifi_security security,
                                             " | grep 'inet ' | awk -F'[: ]+' '{print $4}'");
   const std::string gateway = first_line_of(std::string("netstat -rn | grep ") + kInterface +
                                             " | grep UG | awk '{print $2}'");
+  // Android's netd is not running in recovery, so bionic falls back to
+  // /etc/resolv.conf for hostname resolution.  dhcpcd never writes it here
+  // (its hooks are missing), which is why DNS lookups failed while raw IP
+  // traffic worked.  Use the gateway first, then two public resolvers.
+  if (!gateway.empty()) run("echo nameserver " + gateway + " > /etc/resolv.conf");
+  run("echo nameserver 119.29.29.29 >> /etc/resolv.conf");
+  run("echo nameserver 223.5.5.5 >> /etc/resolv.conf");
+  run("echo nameserver 1.1.1.1 >> /etc/resolv.conf");
   note("Connected\n");
   note("IP address: %s\n", address.empty() ? "(unknown)" : address.c_str());
   note("Gateway: %s\n", gateway.empty() ? "(unknown)" : gateway.c_str());
