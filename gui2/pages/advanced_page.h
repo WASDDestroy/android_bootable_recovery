@@ -29,6 +29,7 @@ struct advanced_page_options {
   const void* reflash_twrp_target = nullptr;
   const void* install_kernel_target = nullptr;
   const void* unmap_super_target = nullptr;
+  const void* ksu_target = nullptr;
 };
 
 void build_advanced_page(const advanced_page_options& options);

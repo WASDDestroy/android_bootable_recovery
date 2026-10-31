@@ -42,6 +42,7 @@ enum class tool_job {
   COPY_LOG,
   FIX_CONTEXTS,
   UNMAP_SUPER_DEVICES,
+  KSU_INSTALL,
   REFLASH_TWRP,
   // repackimage over tw_filename, tw_repack_kernel and tw_repack_backup_first.
   REPACK_IMAGE,
@@ -65,6 +66,7 @@ struct tool_availability {
   bool reflash_twrp = false;
   bool install_kernel = false;
   bool unmap_super_devices = false;
+  bool ksu_install = false;
   // The sideload button needs data media.
   bool sideload = false;
 };
