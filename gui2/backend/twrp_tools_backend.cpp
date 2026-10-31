@@ -1,6 +1,9 @@
 #include "twrp_tools_backend.h"
 
+#include <sys/wait.h>
 #include <unistd.h>
+
+#include <cstdio>
 
 #include <fstream>
 
@@ -65,6 +68,38 @@ int changefilesystem(const std::string& part_path, const std::string& file_syste
   PartitionManager.UpdateSystemDetails();
   operation_end(op_status);
   return op_status;
+}
+
+// One-click KernelSU: stream the script output into the GUI2 console.
+int ksuinstall() {
+  operation_start("Install KernelSU");
+  FILE* pipe = popen("/system/bin/sh /system/bin/ksu_oneroot.sh --mode auto --yes 2>&1", "r");
+  if (pipe == nullptr) {
+    gui2_console::write_raw(gui2_console::severity::error,
+                            "ERROR: cannot start ksu_oneroot.sh\n");
+    operation_end(1);
+    return 1;
+  }
+  char buffer[2048];
+  while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    std::string line(buffer);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+      line.pop_back();
+    auto level = gui2_console::severity::normal;
+    if (line.find("[ALERT]") != std::string::npos ||
+        line.find("[ERROR]") != std::string::npos)
+      level = gui2_console::severity::error;
+    else if (line.find("[WARN]") != std::string::npos)
+      level = gui2_console::severity::warning;
+    else if (line.find("[STEP]") != std::string::npos ||
+             line.find("[OK]") != std::string::npos)
+      level = gui2_console::severity::highlight;
+    gui2_console::write_raw(level, line + "\n");
+  }
+  const int status = pclose(pipe);
+  const int rc = (status != -1 && WIFEXITED(status)) ? WEXITSTATUS(status) : 1;
+  operation_end(rc == 0 ? 0 : 1);
+  return rc == 0 ? 0 : 1;
 }
 
 // GUIAction::cmd
@@ -356,6 +391,7 @@ tool_availability twrp_tools_backend::availability() {
       repack && !flag("tw_no_flash_current_twrp") && !flag("tw_is_vendor_boot_header_v3");
   result.install_kernel = repack;
   result.unmap_super_devices = flag("tw_is_super");
+  result.ksu_install = TWFunc::IsPathExists("/system/bin/ksu_oneroot.sh");
   result.sideload = flag(TW_HAS_DATA_MEDIA);
   return result;
 }
@@ -439,6 +475,9 @@ void twrp_tools_backend::run(tool_job job, std::string target, std::string value
       break;
     case tool_job::UNMAP_SUPER_DEVICES:
       op_status = unmapsuperdevices();
+      break;
+    case tool_job::KSU_INSTALL:
+      op_status = ksuinstall();
       break;
     case tool_job::REFLASH_TWRP:
       op_status = reflashtwrp();

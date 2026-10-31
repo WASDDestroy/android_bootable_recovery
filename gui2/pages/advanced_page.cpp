@@ -45,6 +45,7 @@ void build_advanced_page(const advanced_page_options& options) {
   add(options.install_kernel_target, strings.kernel_title, strings.kernel_summary);
   add(options.fix_bootloop_target, strings.fix_bootloop_title, strings.fix_bootloop_summary);
   add(options.unmap_super_target, strings.unmap_title, strings.unmap_summary);
+  add(options.ksu_target, strings.ksu_title, strings.ksu_summary);
   add(options.merge_snapshots_target, strings.merge_title, strings.merge_summary);
 }
 

@@ -389,6 +389,11 @@ struct language_pack {
   const char* unmap_summary;
   const char* unmap_running;
   const char* unmap_done;
+  const char* ksu_title;
+  const char* ksu_summary;
+  const char* ksu_confirm;
+  const char* ksu_running;
+  const char* ksu_done;
   const char* backup_slot_label;
   const char* backup_slot_a;
   const char* backup_slot_b;

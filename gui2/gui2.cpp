@@ -465,6 +465,7 @@ enum class settings_target {
   REFLASH_TWRP,
   INSTALL_KERNEL,
   UNMAP_SUPER,
+  KSU_INSTALL,
 };
 
 static constexpr settings_target language_target = settings_target::LANGUAGE;
@@ -492,6 +493,7 @@ static constexpr settings_target install_ramdisk_target = settings_target::INSTA
 static constexpr settings_target reflash_twrp_target = settings_target::REFLASH_TWRP;
 static constexpr settings_target install_kernel_target = settings_target::INSTALL_KERNEL;
 static constexpr settings_target unmap_super_target = settings_target::UNMAP_SUPER;
+static constexpr settings_target ksu_target = settings_target::KSU_INSTALL;
 // 0..count-1 for the rows of a list to carry as their user data. A longer list
 // gets a new table; the old ones stay, so rows already built keep theirs.
 static const int* row_indices(size_t count) {
@@ -1349,7 +1351,8 @@ static void settings_option_event_cb(lv_event_t* event) {
              *target == settings_target::DISABLE_AVB2 ||
              *target == settings_target::FIX_CONTEXTS ||
              *target == settings_target::REFLASH_TWRP ||
-             *target == settings_target::UNMAP_SUPER)
+             *target == settings_target::UNMAP_SUPER ||
+             *target == settings_target::KSU_INSTALL)
     open_advanced_tool(*target);
 }
 
@@ -5031,6 +5034,14 @@ static void open_advanced_tool(settings_target target) {
     request.summary = strings().merge_summary;
     request.running = strings().merging;
     request.done = strings().merge_complete;
+  } else if (target == settings_target::KSU_INSTALL) {
+    request.job = gui2_backend::tool_job::KSU_INSTALL;
+    request.title = strings().ksu_title;
+    request.summary = strings().ksu_summary;
+    request.text = strings().ksu_confirm;
+    request.tone = gui2_pages::confirm_tone::DANGER;
+    request.running = strings().ksu_running;
+    request.done = strings().ksu_done;
   } else {
     request.job = gui2_backend::tool_job::DISABLE_AVB2;
     request.title = strings().avb_title;
@@ -5497,6 +5508,7 @@ static void show_action_page(const action_definition& definition, page_transitio
         available.install_kernel ? &install_kernel_target : nullptr;
     advanced_options.unmap_super_target =
         available.unmap_super_devices ? &unmap_super_target : nullptr;
+    advanced_options.ksu_target = available.ksu_install ? &ksu_target : nullptr;
     if (!available.sideload) advanced_options.sideload_target = nullptr;
     gui2_pages::build_advanced_page(advanced_options);
   }
