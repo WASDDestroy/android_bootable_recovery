@@ -24,6 +24,7 @@
 #include <linux/fs.h>
 #include <linux/netlink.h>
 #include <linux/types.h>
+#include <mntent.h>
 #include <sys/mount.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
@@ -326,15 +327,148 @@ static std::map<std::string, FlagsMap> LoadTwrpFlags() {
 
 
 #ifndef TW_SKIP_ADDITIONAL_FSTAB
+namespace {
+
+// Crypto columns TWRP itself declares for /data in its own fstab.
+struct DataCryptoColumns {
+  bool inlinecrypt = false;
+  std::vector<std::string> fsmgr_flags;
+  bool empty() const { return !inlinecrypt && fsmgr_flags.empty(); }
+};
+
+DataCryptoColumns GetDataCryptoColumns(const std::string& fstab_path) {
+  DataCryptoColumns columns;
+  const auto parsed = twrp::fstab::ParseFstabFromFile(fstab_path);
+  if (!parsed.Ok()) return columns;
+  const auto entry = std::ranges::find_if(parsed.fstab, [](const twrp::fstab::FstabEntry& line) {
+    return line.mount_point == "/data";
+  });
+  if (entry == parsed.fstab.end()) return columns;
+
+  // Wrapped keys only work when the filesystem is mounted with inlinecrypt.
+  for (const std::string& option : android::base::Tokenize(entry->raw_mnt_flags, ","))
+    if (option == "inlinecrypt") columns.inlinecrypt = true;
+
+  if (!entry->encryption_options.empty())
+    columns.fsmgr_flags.push_back("fileencryption=" + entry->encryption_options);
+  if (!entry->metadata_key_dir.empty())
+    columns.fsmgr_flags.push_back("keydirectory=" + entry->metadata_key_dir);
+  if (!entry->metadata_encryption_options.empty())
+    columns.fsmgr_flags.push_back("metadata_encryption=" + entry->metadata_encryption_options);
+  return columns;
+}
+
+bool HasFsMgrFlag(const std::vector<std::string>& flags, const std::string& name) {
+  return std::ranges::any_of(flags, [&](const std::string& flag) {
+    return flag.substr(0, flag.find('=')) == name;
+  });
+}
+
+enum class CryptoRestore { kFailed, kUnchanged, kPatched };
+
+// Rewrites the /data line of |path| with any missing crypto columns. Every other
+// line, and any /data line that already carries them, is left byte for byte alone.
+CryptoRestore RestoreDataCryptoColumns(const std::string& path,
+                                       const DataCryptoColumns& columns) {
+  if (columns.empty()) return CryptoRestore::kUnchanged;
+
+  std::ifstream in(path);
+  if (!in) {
+    LOGERR("Unable to read %s for crypto column restore\n", path.c_str());
+    return CryptoRestore::kFailed;
+  }
+
+  std::vector<std::string> lines;
+  std::string line;
+  bool patched = false;
+  while (std::getline(in, line)) {
+    std::vector<std::string> fields = android::base::Tokenize(line, " \t");
+    // Expect <blk_device> <mount_point> <fs_type> <mnt_flags> [<fsmgr_flags>];
+    // anything else (blank lines, comments, odd layouts) is copied unchanged.
+    if (fields.size() < 4 || fields.size() > 5 || fields[1] != "/data") {
+      lines.push_back(line);
+      continue;
+    }
+
+    bool changed = false;
+    if (columns.inlinecrypt) {
+      std::vector<std::string> options = android::base::Tokenize(fields[3], ",");
+      if (!std::ranges::any_of(options, [](const std::string& option) {
+            return option == "inlinecrypt";
+          })) {
+        options.push_back("inlinecrypt");
+        fields[3] = android::base::Join(options, ',');
+        changed = true;
+      }
+    }
+    if (!columns.fsmgr_flags.empty()) {
+      if (fields.size() == 4) fields.emplace_back();
+      std::vector<std::string> flags = android::base::Tokenize(fields[4], ",");
+      for (const std::string& flag : columns.fsmgr_flags) {
+        if (HasFsMgrFlag(flags, flag.substr(0, flag.find('=')))) continue;
+        flags.push_back(flag);
+        changed = true;
+      }
+      if (changed) fields[4] = android::base::Join(flags, ',');
+    }
+
+    if (!changed) {
+      lines.push_back(line);
+      continue;
+    }
+    line = android::base::Join(fields, ' ');
+    LOGINFO("%s: restored crypto columns on /data: %s\n", path.c_str(), line.c_str());
+    patched = true;
+    lines.push_back(line);
+  }
+  in.close();
+  if (!patched) return CryptoRestore::kUnchanged;
+
+  std::ofstream out(path, std::ios::trunc);
+  if (!out) {
+    LOGERR("Unable to rewrite %s\n", path.c_str());
+    return CryptoRestore::kFailed;
+  }
+  for (const std::string& entry : lines) out << entry << '\n';
+  return out ? CryptoRestore::kPatched : CryptoRestore::kFailed;
+}
+
+}  // namespace
+
 // Copies the vendor fstab to /etc/additional.fstab and switches fstab_filename
 // to it; the return value asks the caller for one more, vendor fstab pass.
-static bool FetchAdditionalFstab(std::string* fstab_filename) {
+static bool FetchAdditionalFstab(std::string* fstab_filename, const std::string& primary_fstab) {
   if (!TWFunc::FindFstab(*fstab_filename)) {
     LOGINFO("Unable to parse vendor fstab\n");
     return false;
   }
   LOGINFO("Fstab: %s\n", fstab_filename->c_str());
   TWFunc::CopyFile(*fstab_filename, additional_fstab, 0600, false);
+
+  // Devices that keep fileencryption/keydirectory/metadata_encryption only in the
+  // vendor_boot ramdisk ship a vendor fstab without them. The vendor pass rebuilds
+  // /data from that copy and MetadataCrypt re-reads the same file, so losing the
+  // columns here leaves data undecryptable even with a valid credential. Carry
+  // TWRP's own columns over before the pass runs.
+  DataCryptoColumns columns = GetDataCryptoColumns(primary_fstab);
+  if (columns.empty() && primary_fstab != "/etc/recovery.fstab")
+    columns = GetDataCryptoColumns("/etc/recovery.fstab");
+  if (columns.empty()) {
+    LOGINFO("No crypto columns for /data in %s; vendor fstab left as is\n",
+            primary_fstab.c_str());
+  } else {
+    switch (RestoreDataCryptoColumns(additional_fstab, columns)) {
+      case CryptoRestore::kPatched:
+        break;
+      case CryptoRestore::kUnchanged:
+        LOGINFO("Vendor fstab already carries the /data crypto columns\n");
+        break;
+      case CryptoRestore::kFailed:
+        LOGERR("Unable to carry the /data crypto columns into %s\n", additional_fstab.c_str());
+        break;
+    }
+  }
+
   *fstab_filename = additional_fstab;
   android::base::SetProperty("fstab.additional", "1");
   return true;
@@ -462,8 +596,10 @@ int TWPartitionManager::ProcessFstab(std::string fstab_filename, const bool disp
     LOGINFO("Skipping Additional Fstab Processing\n");
     android::base::SetProperty("fstab.additional", "0");
 #else
+    // The primary fstab carries the crypto columns the vendor copy may omit.
+    const std::string primary_fstab = fstab_filename;
     // Vendor fstab pass: replaces the /data and /metadata entries.
-    if (FetchAdditionalFstab(&fstab_filename)) {
+    if (FetchAdditionalFstab(&fstab_filename, primary_fstab)) {
       if (!ProcessFstabFile(fstab_filename, true, display_error, twrp_flags)) return false;
       ven = FindPartitionByPath("/vendor");
       odm = FindPartitionByPath("/odm");
@@ -588,6 +724,17 @@ bool TWPartitionManager::SetupFstabPartitions(const bool display_error) {
 #ifdef TW_INCLUDE_CRYPTO
   DataManager::SetValue(TW_IS_ENCRYPTED, 1);
   DecryptData();
+  // override-spl rewrites the security patch level to the installed ROM's. A
+  // KeyMint keyblob is bound to the SPL that created it, and data that has not
+  // been formatted since the ROM was switched still holds blobs from the older,
+  // newer-SPL ROM: lowering the property first makes every keystore operation
+  // on them fail in upgrade_keyblob_if_required() with INVALID_ARGUMENT, which
+  // surfaces as "Wrong credential" on the decrypt page. Let init start
+  // override-spl only once nothing is left to unlock.
+  if (!TWPartition::DataIsLocked()) {
+    LOGINFO("No credential left to unlock; releasing override-spl\n");
+    android::base::SetProperty("twrp.crypto.ready", "1");
+  }
 #endif
 
   UpdateSystemDetails(true);
@@ -631,8 +778,9 @@ void TWPartitionManager::DecryptData() {
     SetCryptoState();
     // Ensure the metadata key directory's partition is mounted before we use it.
     if (const TWPartition* key_dir = FindPartitionByPath(data->key_directory_);
-      key_dir && !key_dir->IsMounted())
-      MountByPath(data->key_directory_, false);
+      key_dir && !key_dir->IsMounted() &&
+      !MountByPath(data->key_directory_, false))
+      LOGERR("Unable to mount %s for metadata decryption\n", data->key_directory_.c_str());
     if (!data->key_directory_.empty()) {
       SetCryptoType("file");
 #ifdef TW_INCLUDE_FBE_METADATA_DECRYPT
@@ -2046,6 +2194,14 @@ int TWPartitionManager::DecryptDevice(const std::string& Password, const int use
 
   // is_fbe_ survives DE failure even when the UI flag has been cleared.
   TWPartition* data = FindPartitionByPath("/data");
+  if (data != nullptr && !data->is_fbe_ && !data->key_directory_.empty()) {
+    // The boot-time DE pass can lose the race with keystore2/KeyMint startup, and
+    // is_fbe_ then stays false. Without this retry a credential attempt returns
+    // -1 before any key is unwrapped, which the UI reports as a wrong credential.
+    LOGINFO("Metadata mapping missing; retrying DE setup before the credential check\n");
+    DecryptData();
+    data = FindPartitionByPath("/data");
+  }
   if (data != nullptr && data->is_fbe_) {
 #ifdef TW_INCLUDE_FBE
     if (!PrepareDataForDe(true)) return -1;
@@ -2065,6 +2221,7 @@ int TWPartitionManager::DecryptDevice(const std::string& Password, const int use
     }
     if (!user_need_decrypt) {
       LOGINFO("User %d does not require decryption\n", user_id);
+      android::base::SetProperty("twrp.crypto.ready", "1");
       return 0;
     }
 
@@ -2078,6 +2235,8 @@ int TWPartitionManager::DecryptDevice(const std::string& Password, const int use
       gui2_console::info("decrypt_user_success_fbe", user_id);
       MarkUserDecrypted(user_id);
       if (user_id == 0) PostDecrypt("");
+      // Nothing is left for keystore2 to unwrap with TWRP's own SPL.
+      android::base::SetProperty("twrp.crypto.ready", "1");
 
       return 0;
     }
@@ -3567,6 +3726,50 @@ void TWPartitionManager::UnlockBlockPartitions() {
   }
 }
 
+// True when the mapper node is a symlink whose dm device is already gone, i.e.
+// only ueventd's cleanup is outstanding. Destroying it again can only fail.
+static bool IsStaleMapperLink(const fs::path& mapper_path) {
+  struct stat st{};
+  if (stat(mapper_path.c_str(), &st) == 0) return false;
+  if (errno != ENOENT) return false;
+  return lstat(mapper_path.c_str(), &st) == 0;
+}
+
+// dm refuses to remove a device that anything still has mounted, and the busy
+// mount point is not necessarily the partition's own: the WLAN module loader
+// mounts system_dlkm at /tmp/sdlkm and leaves it there. Release every mount
+// backed by the device so "Remove Super Devices" and Format Data can proceed.
+static bool UnmountDeviceUsers(const fs::path& mapper_path) {
+  struct stat device{};
+  if (stat(mapper_path.c_str(), &device) != 0) return false;
+
+  std::vector<std::string> mount_points;
+  std::unique_ptr<FILE, decltype(&endmntent)> mounts(setmntent("/proc/mounts", "r"), endmntent);
+  if (mounts) {
+    while (mntent* entry = getmntent(mounts.get())) {
+      struct stat mounted{};
+      if (stat(entry->mnt_dir, &mounted) != 0) continue;
+      if (mounted.st_rdev != device.st_rdev) continue;
+      mount_points.emplace_back(entry->mnt_dir);
+    }
+  }
+  // Deepest paths first so nested mounts detach before their parents.
+  std::ranges::sort(mount_points, [](const std::string& a, const std::string& b) {
+    return a.size() > b.size();
+  });
+
+  bool released = false;
+  for (const std::string& mount_point : mount_points) {
+    if (umount2(mount_point.c_str(), MNT_DETACH) == 0) {
+      LOGINFO("Unmounted %s to release %s\n", mount_point.c_str(), mapper_path.c_str());
+      released = true;
+    } else {
+      LOGERR("Unable to unmount %s: %s\n", mount_point.c_str(), strerror(errno));
+    }
+  }
+  return released;
+}
+
 // Destroys a logical partition only if its mapper node exists; ENOENT means it
 // was never mapped (or is already gone), which counts as success.
 static bool DestroyIfMapped(const std::string& name) {
@@ -3580,9 +3783,21 @@ static bool DestroyIfMapped(const std::string& name) {
     LOGERR("Unable to inspect dynamic partition %s: %s\n", name.c_str(), strerror(errno));
     return false;
   }
+  if (IsStaleMapperLink(mapper_path)) {
+    LOGINFO("dynamic partition %s is already unmapped (stale mapper link)\n", name.c_str());
+    return true;
+  }
+  const bool released = UnmountDeviceUsers(mapper_path);
   if (DestroyLogicalPartition(name)) return true;
+  if (released) {
+    // A detached mount can take a moment to drop the last reference.
+    usleep(100000);
+    if (DestroyLogicalPartition(name)) return true;
+  }
   // It may have disappeared between lstat() and destruction.
   if (lstat(mapper_path.c_str(), &st) != 0 && errno == ENOENT) return true;
+  if (IsStaleMapperLink(mapper_path)) return true;
+  LOGERR("Unable to destroy dynamic partition %s: device still in use?\n", name.c_str());
   return false;
 }
 
@@ -3590,6 +3805,7 @@ bool TWPartitionManager::UnmapSuperDevices() {
 #ifndef TW_EXCLUDE_APEX
   TwrpApex::Unmount();
 #endif
+  bool ok = true;
   for (auto iter = partitions_.begin(); iter != partitions_.end();) {
     TWPartition* partition = *iter;
     LOGINFO("Checking partition: %s\n", partition->GetMountPoint().c_str());
@@ -3601,7 +3817,8 @@ bool TWPartitionManager::UnmapSuperDevices() {
     std::string blk_device_partition = GetBarePartitionName(partition->GetMountPoint());
     if (DataManager::GetStrValue("tw_has_boot_slots") ==
         "1") blk_device_partition += GetActiveSlotSuffix();
-    partition->Unmount(false);
+    if (!partition->Unmount(false))
+      LOGERR("Unable to unmount %s before unmapping it\n", partition->GetMountPoint().c_str());
     LOGINFO("removing dynamic partition: %s\n", blk_device_partition.c_str());
     bool destroyed = DestroyIfMapped(blk_device_partition);
 
@@ -3617,7 +3834,9 @@ bool TWPartitionManager::UnmapSuperDevices() {
 
     iter = partitions_.erase(iter);
     delete partition;
-    if (!destroyed) return false;
+    // Keep going so the log names every device that could not be released
+    // instead of stopping at the first one.
+    if (!destroyed) ok = false;
   }
 
   // Sweep mapper entries with no fstab partition (e.g. leftovers from an
@@ -3635,9 +3854,9 @@ bool TWPartitionManager::UnmapSuperDevices() {
       continue;
     }
     LOGINFO("removing dynamic partition: %s\n", partition.c_str());
-    if (!DestroyIfMapped(partition)) return false;
+    if (!DestroyIfMapped(partition)) ok = false;
   }
-  return true;
+  return ok;
 }
 
 
