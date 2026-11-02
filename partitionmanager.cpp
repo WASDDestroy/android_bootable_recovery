@@ -203,6 +203,9 @@ static bool DoDisableAvb2(const std::string& ab_suffix, const bool disable_verit
     LOGERR("Reject disabling AVB2.0 on locked devices.");
     return false;
   }
+  gui2_console::write_raw(
+          gui2_console::severity::highlight,
+          "Note: you cannot --disable-verification on this device, it will result in bootloop.\n");
   std::string vbmeta_part = "vbmeta";
   if (!ab_suffix.empty()) vbmeta_part += ab_suffix;
   AvbOps* ops = avb_ops_user_new();
