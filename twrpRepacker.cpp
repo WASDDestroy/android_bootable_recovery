@@ -35,6 +35,27 @@
 using android::hal::BootControlClient;
 #endif
 
+namespace {
+
+// Repack_Image_Internal stages a full copy of the boot image in REPACK_ORIG_DIR
+// and REPACK_NEW_DIR. Remove them however the call ends, except when the caller
+// owns the repacked image: the "repack only" path returns it inside
+// REPACK_NEW_DIR and cleans up once it has used it.
+class Repack_Dir_Cleanup {
+public:
+	~Repack_Dir_Cleanup() {
+		if (keep_)
+			return;
+		TWFunc::RemoveDir(REPACK_ORIG_DIR, false);
+		TWFunc::RemoveDir(REPACK_NEW_DIR, false);
+	}
+	void Keep() { keep_ = true; }
+private:
+	bool keep_ = false;
+};
+
+}  // namespace
+
 bool twrpRepacker::PrepareEmptyFolder(const std::string& Folder) {
 	if (TWFunc::IsPathExists(Folder))
 		TWFunc::RemoveDir(Folder, false);
@@ -166,6 +187,8 @@ bool twrpRepacker::Repack_Image(const std::string& Target_Image, const struct Re
 }
 
 bool twrpRepacker::Repack_Image_Internal(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options, bool flash, std::string* out_image) {
+	Repack_Dir_Cleanup cleanup;
+
 	if (!TWFunc::IsPathExists("/system/bin/magiskboot")) {
 		LOGERR("Image repacking tool not present in this TWRP build!");
 		return false;
@@ -297,6 +320,9 @@ bool twrpRepacker::Repack_Image_Internal(const std::string& Target_Image, const 
 	}
 
 	if (!flash) {
+		// The repacked image stays in REPACK_NEW_DIR; the caller owns both the
+		// image and the cleanup once it is done with it.
+		cleanup.Keep();
 		if (out_image) *out_image = path + "new-boot.img";
 		DataManager::SetProgress(1);
 		return true;
@@ -310,7 +336,6 @@ bool twrpRepacker::Repack_Image_Internal(const std::string& Target_Image, const 
 		return false;
 	}
 	DataManager::SetProgress(1);
-	TWFunc::RemoveDir(REPACK_ORIG_DIR, false);
 	if (part->IsSlotSelect()) {
 		if (Repack_Options.Type == REPLACE_RAMDISK || Repack_Options.Type == REPLACE_RAMDISK_UNPACKED) {
 			LOGINFO("Switching slots to flash ramdisk to both partitions\n");
@@ -359,10 +384,8 @@ bool twrpRepacker::Repack_Image_Internal(const std::string& Target_Image, const 
 				return false;
 			}
 			DataManager::SetProgress(1);
-			TWFunc::RemoveDir(REPACK_ORIG_DIR, false);
 		}
 	}
-	TWFunc::RemoveDir(REPACK_NEW_DIR, false);
 	if (dest_partition == "/boot")
 		gui2_console::warning("repack_overwrite_warning");
 	return true;
