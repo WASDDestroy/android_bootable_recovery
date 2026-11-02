@@ -214,6 +214,7 @@ static bool DoDisableAvb2(const std::string& ab_suffix, const bool disable_verit
         gui2_console::log_error("disable_avb2_fail_msg", vbmeta_part);
     }
   }
+  /*
   if (disable_verification) {
     if (!avb_user_verification_set(ops, ab_suffix.c_str(), false)) {
       ok = false;
@@ -221,6 +222,7 @@ static bool DoDisableAvb2(const std::string& ab_suffix, const bool disable_verit
         gui2_console::log_error("disable_avb2_fail_msg", vbmeta_part);
     }
   }
+  */
   if (ok && display_info) {
     gui2_console::highlight("disable_avb2_success_msg", vbmeta_part);
   }
