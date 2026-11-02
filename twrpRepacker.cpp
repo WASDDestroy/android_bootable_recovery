@@ -20,6 +20,7 @@
 #include <string>
 #include <sys/mount.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "data.hpp"
 #include "partitions.hpp"
@@ -81,13 +82,26 @@ bool twrpRepacker::Backup_Image_For_Repack(TWPartition* part, const std::string&
 			return false;
 		}
 	}
-	original_ramdisk_format = Unpack_Image(target_image, Temp_Folder_Destination, false, false);
-	return !original_ramdisk_format.empty();
+	bool unpacked = false;
+	original_ramdisk_format = Unpack_Image(target_image, Temp_Folder_Destination, false, false, &unpacked);
+	if (!unpacked)
+		return false;
+	// A GKI boot image has no ramdisk of its own (the generic ramdisk lives in
+	// init_boot): magiskboot reports no ramdisk format and extracts the kernel
+	// alone, which is a perfectly repackable image.
+	if (original_ramdisk_format.empty() &&
+		!TWFunc::IsPathExists(std::string(Temp_Folder_Destination) + "kernel")) {
+		LOGERR("Unpacking '%s' produced neither a kernel nor a ramdisk\n", target_image.c_str());
+		return false;
+	}
+	return true;
 }
 
 std::string twrpRepacker::Unpack_Image(const std::string& Source_Path, const std::string& Temp_Folder_Destination,
-										const bool Copy_Source, const bool Create_Destination) {
+										const bool Copy_Source, const bool Create_Destination, bool* unpacked) {
 	std::string txt_to_find = "RAMDISK_FMT";
+	if (unpacked)
+		*unpacked = false;
 	if (Create_Destination) {
 		if (!PrepareEmptyFolder(Temp_Folder_Destination))
 			return std::string();
@@ -109,6 +123,8 @@ std::string twrpRepacker::Unpack_Image(const std::string& Source_Path, const std
 		gui2_console::log_error("unpack_error");
 		return std::string();
 	}
+	if (unpacked)
+		*unpacked = true;
 	std::string ramdisk_format;
 	auto pos = magisk_unpack_output.find(txt_to_find);
 	if (pos != std::string::npos) {
@@ -136,6 +152,8 @@ std::string twrpRepacker::Unpack_Image(const std::string& Source_Path, const std
 			}
 		}
 	}
+	// An empty format is not a failure: an image without a ramdisk simply has
+	// none to report, so the caller must not use the format as a success flag.
 	return ramdisk_format;
 }
 
@@ -204,18 +222,28 @@ bool twrpRepacker::Repack_Image_Internal(const std::string& Target_Image, const 
 		image_ramdisk_format = "gzip";
 	} else {
 		gui2_console::info("unpacking_image", Target_Image);
-		image_ramdisk_format = Unpack_Image(Target_Image, REPACK_NEW_DIR, true);
+		bool unpacked = false;
+		image_ramdisk_format = Unpack_Image(Target_Image, REPACK_NEW_DIR, true, true, &unpacked);
+		if (!unpacked)
+			return false;
 	}
-	if (image_ramdisk_format.empty())
-		return false;
 	DataManager::SetProgress(.5);
 	gui2_console::info("repacking_image", part->GetDisplayName());
 	std::string path = REPACK_NEW_DIR;
 	if (Repack_Options.Type == REPLACE_KERNEL) {
 		// When we replace the kernel, what we really do is copy the boot partition ramdisk into the new image's folder
-		if (TWFunc::CopyFile(REPACK_ORIG_DIR + ramdisk_cpio, REPACK_NEW_DIR + ramdisk_cpio, 0644)) {
-			LOGERR("Failed to copy ramdisk\n");
-			return false;
+		const std::string orig_ramdisk = REPACK_ORIG_DIR + ramdisk_cpio;
+		if (TWFunc::IsPathExists(orig_ramdisk)) {
+			if (TWFunc::CopyFile(orig_ramdisk, REPACK_NEW_DIR + ramdisk_cpio, 0644)) {
+				LOGERR("Failed to copy ramdisk\n");
+				return false;
+			}
+		} else {
+			// The boot partition has no ramdisk of its own (the generic ramdisk
+			// lives in init_boot), so install the kernel alone and keep the
+			// partition layout instead of importing the kernel image's ramdisk.
+			LOGINFO("Boot has no ramdisk; repacking the kernel only\n");
+			unlink((std::string(REPACK_NEW_DIR) + ramdisk_cpio).c_str());
 		}
 	} else if (Repack_Options.Type == REPLACE_RAMDISK_UNPACKED) {
 			if (TWFunc::CopyFile(Target_Image, REPACK_ORIG_DIR + ramdisk_cpio, 0644)) {
@@ -243,7 +271,7 @@ bool twrpRepacker::Repack_Image_Internal(const std::string& Target_Image, const 
 	if (Repack_Options.Disable_Force_Encrypt)
 		LOGERR("Disabling force encrypt is not implemented yet\n");
 	std::string command = "cd " + path + " && /system/bin/magiskboot repack ";
-	if (original_ramdisk_format != image_ramdisk_format) {
+	if (!original_ramdisk_format.empty() && original_ramdisk_format != image_ramdisk_format) {
 		recompress = true;
 	}
 

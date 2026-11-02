@@ -39,7 +39,7 @@ struct RepackOptionsStruct {
 class twrpRepacker {
     public:
         bool Backup_Image_For_Repack(TWPartition* part, const std::string& Temp_Folder_Destination, const bool Create_Backup, const std::string& backup_name); // Prepares an image for repacking by unpacking it to the temp folder destination
-        std::string Unpack_Image(const std::string& Source_Path, const std::string& Temp_Folder_Destination, const bool Copy_Source, const bool Create_Destination = true); // Prepares an image for repacking by unpacking it to the temp folder destination and return the ramdisk format
+        std::string Unpack_Image(const std::string& Source_Path, const std::string& Temp_Folder_Destination, const bool Copy_Source, const bool Create_Destination = true, bool* unpacked = nullptr); // Prepares an image for repacking by unpacking it to the temp folder destination and return the ramdisk format, empty for an image without a ramdisk; *unpacked tells whether magiskboot unpacked the image at all
         bool Repack_Image_And_Flash(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options); // Repacks the boot image with a new kernel or a new ramdisk and flashes it
         bool Repack_Image(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options, std::string* out_image); // Repacks only; the caller owns flashing
         bool Flash_Current_Twrp();
