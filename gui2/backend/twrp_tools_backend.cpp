@@ -7,6 +7,8 @@
 
 #include <fstream>
 
+#include <android-base/properties.h>
+
 #include "data.hpp"
 #include "gui2/console/stdio_adapter.h"
 #include "gui2/console/messages.h"
@@ -25,6 +27,18 @@ namespace {
 
 bool flag(const char* name) {
   return DataManager::GetIntValue(name) != 0;
+}
+
+// The kernel install has to go through the AVB rebuild unless the bootloader is
+// provably unlocked. An unknown state is routed to the shell backend so that it
+// can refuse instead of writing an unsigned boot image.
+bool bootloader_unlocked() {
+  const std::string state = android::base::GetProperty("ro.boot.vbmeta.device_state", "");
+  const std::string locked = android::base::GetProperty("ro.boot.flash.locked", "");
+  // A single locked report wins over an unlocked one; anything else unknown is
+  // routed to the shell backend, which refuses unless it is explicitly forced.
+  if (state == "locked" || locked == "1") return false;
+  return state == "unlocked" || locked == "0";
 }
 
 int repair(const std::string& part_path) {
@@ -70,13 +84,13 @@ int changefilesystem(const std::string& part_path, const std::string& file_syste
   return op_status;
 }
 
-// One-click KernelSU: stream the script output into the GUI2 console.
-int ksuinstall() {
-  operation_start("Install KernelSU");
-  FILE* pipe = popen("/system/bin/sh /system/bin/ksu_oneroot.sh --mode auto --yes 2>&1", "r");
+// Streams a backend script's output into the GUI2 console and waits for it.
+int run_streaming(const std::string& command, const char* operation) {
+  operation_start(operation);
+  FILE* pipe = popen(command.c_str(), "r");
   if (pipe == nullptr) {
     gui2_console::write_raw(gui2_console::severity::error,
-                            "ERROR: cannot start ksu_oneroot.sh\n");
+                            "ERROR: cannot start the backend script\n");
     operation_end(1);
     return 1;
   }
@@ -100,6 +114,12 @@ int ksuinstall() {
   const int rc = (status != -1 && WIFEXITED(status)) ? WEXITSTATUS(status) : 1;
   operation_end(rc == 0 ? 0 : 1);
   return rc == 0 ? 0 : 1;
+}
+
+// One-click KernelSU: stream the script output into the GUI2 console.
+int ksuinstall() {
+  return run_streaming("/system/bin/sh /system/bin/ksu_oneroot.sh --mode auto --yes 2>&1",
+                       "Install KernelSU");
 }
 
 // GUIAction::cmd
@@ -181,18 +201,42 @@ exit:
 int repackimage() {
   int op_status = 1;
   twrpRepacker repacker;
+  const std::string path = DataManager::GetStrValue("tw_filename");
+
+  RepackOptionsStruct Repack_Options;
+  Repack_Options.Disable_Verity = false;
+  Repack_Options.Disable_Force_Encrypt = false;
+  Repack_Options.Backup_First = DataManager::GetIntValue("tw_repack_backup_first") != 0;
+  if (DataManager::GetIntValue("tw_repack_kernel") == 1)
+    Repack_Options.Type = REPLACE_KERNEL;
+  else
+    Repack_Options.Type = REPLACE_RAMDISK;
+
+  // A locked (or unknown) bootloader rejects an unsigned boot image: rebuild the
+  // testkey AVB chain around the repacked kernel before anything is written.
+  if (Repack_Options.Type == REPLACE_KERNEL && !bootloader_unlocked()) {
+    if (!TWFunc::IsPathExists("/system/bin/kernel_avb_flash.sh")) {
+      gui2_console::write_raw(
+          gui2_console::severity::error,
+          "ERROR: kernel_avb_flash.sh is missing; refusing to flash an unsigned boot image\n");
+      return 1;
+    }
+    operation_start("Repack Image");
+    std::string image;
+    if (repacker.Repack_Image(path, Repack_Options, &image)) op_status = 0;
+    operation_end(op_status);
+    if (op_status != 0) return 1;
+
+    const int rc = run_streaming(
+        "/system/bin/sh /system/bin/kernel_avb_flash.sh --image \"" + image + "\" --yes 2>&1",
+        "Install Kernel");
+    TWFunc::RemoveDir(REPACK_NEW_DIR, false);
+    TWFunc::RemoveDir(REPACK_ORIG_DIR, false);
+    return rc;
+  }
 
   operation_start("Repack Image");
   {
-    std::string path = DataManager::GetStrValue("tw_filename");
-    RepackOptionsStruct Repack_Options;
-    Repack_Options.Disable_Verity = false;
-    Repack_Options.Disable_Force_Encrypt = false;
-    Repack_Options.Backup_First = DataManager::GetIntValue("tw_repack_backup_first") != 0;
-    if (DataManager::GetIntValue("tw_repack_kernel") == 1)
-      Repack_Options.Type = REPLACE_KERNEL;
-    else
-      Repack_Options.Type = REPLACE_RAMDISK;
     if (!repacker.Repack_Image_And_Flash(path, Repack_Options)) goto exit;
   }
   op_status = 0;

@@ -40,9 +40,11 @@ class twrpRepacker {
     public:
         bool Backup_Image_For_Repack(TWPartition* part, const std::string& Temp_Folder_Destination, const bool Create_Backup, const std::string& backup_name); // Prepares an image for repacking by unpacking it to the temp folder destination
         std::string Unpack_Image(const std::string& Source_Path, const std::string& Temp_Folder_Destination, const bool Copy_Source, const bool Create_Destination = true); // Prepares an image for repacking by unpacking it to the temp folder destination and return the ramdisk format
-        bool Repack_Image_And_Flash(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options); // Repacks the boot image with a new kernel or a new ramdisk
+        bool Repack_Image_And_Flash(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options); // Repacks the boot image with a new kernel or a new ramdisk and flashes it
+        bool Repack_Image(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options, std::string* out_image); // Repacks only; the caller owns flashing
         bool Flash_Current_Twrp();
     private:
+	bool Repack_Image_Internal(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options, bool flash, std::string* out_image); // Shared repack path; flash=false returns the image without writing a partition
     	bool PrepareEmptyFolder(const std::string& Folder); // Creates an empty folder at Folder. If the folder already exists, the folder is deleted, then created
     	std::string original_ramdisk_format;                  // Ramdisk format of boot partition
 	    std::string image_ramdisk_format;                     // Ramdisk format of boot image to repack from

@@ -140,6 +140,14 @@ std::string twrpRepacker::Unpack_Image(const std::string& Source_Path, const std
 }
 
 bool twrpRepacker::Repack_Image_And_Flash(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options) {
+	return Repack_Image_Internal(Target_Image, Repack_Options, true, nullptr);
+}
+
+bool twrpRepacker::Repack_Image(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options, std::string* out_image) {
+	return Repack_Image_Internal(Target_Image, Repack_Options, false, out_image);
+}
+
+bool twrpRepacker::Repack_Image_Internal(const std::string& Target_Image, const struct RepackOptionsStruct& Repack_Options, bool flash, std::string* out_image) {
 	if (!TWFunc::IsPathExists("/system/bin/magiskboot")) {
 		LOGERR("Image repacking tool not present in this TWRP build!");
 		return false;
@@ -162,8 +170,11 @@ bool twrpRepacker::Repack_Image_And_Flash(const std::string& Target_Image, const
 			LOGINFO("Vendor_boot with v3 header\n");
 		}
 	#else
-		// we shouldn't reach here, because of the code in twrpRepacker::Flash_Current_Twrp(); but if we do, then handle it
-		if (PartitionManager.FindPartitionByPath("/recovery") && !DataManager::GetStrValue("tw_active_slot").empty()) {
+		// A kernel always belongs in boot. Only a recovery ramdisk install goes
+		// to the dedicated recovery partition; see twrpRepacker::Flash_Current_Twrp().
+		if (Repack_Options.Type != REPLACE_KERNEL &&
+		    PartitionManager.FindPartitionByPath("/recovery") &&
+		    !DataManager::GetStrValue("tw_active_slot").empty()) {
 			dest_partition = "/recovery";
 		}
 	#endif
@@ -255,6 +266,12 @@ bool twrpRepacker::Repack_Image_And_Flash(const std::string& Target_Image, const
 	if (TWFunc::ExecCmd(command) != 0) {
 		gui2_console::log_error("repack_error");
 		return false;
+	}
+
+	if (!flash) {
+		if (out_image) *out_image = path + "new-boot.img";
+		DataManager::SetProgress(1);
+		return true;
 	}
 
 	DataManager::SetProgress(.75);
