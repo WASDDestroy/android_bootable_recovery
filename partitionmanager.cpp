@@ -198,6 +198,11 @@ static void ResetPropFromPartition(const std::string& prop, const std::string& d
 
 static bool DoDisableAvb2(const std::string& ab_suffix, const bool disable_verity,
                           const bool disable_verification, const bool display_info) {
+  if (android::base::GetProperty("ro.boot.vbmeta.device_state", "locked") == "locked") {
+    gui2_console::log_error("disable_avb2_fail_msg", "device is locked, reject disabling AVB 2.0 because this breaks trust chain");
+    LOGERR("Reject disabling AVB2.0 on locked devices.");
+    return false;
+  }
   std::string vbmeta_part = "vbmeta";
   if (!ab_suffix.empty()) vbmeta_part += ab_suffix;
   AvbOps* ops = avb_ops_user_new();
